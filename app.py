@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, g
+from flask import Flask, abort, render_template, request, redirect, url_for, session, flash, g
 from werkzeug.security import generate_password_hash, check_password_hash
 from cryptography.fernet import Fernet
 import collections
@@ -908,10 +908,72 @@ def user_risk_analysis(user_id):
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
+    # 2.1
+    content_score = 0
+    profile_score = 0
+    post_risk_score = 0
+    comment_risk_score = 0
+    average_post_score = 0
+    average_comment_score = 0
     
-    score = 0
+    user_posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
 
-    return score;
+    for post in user_posts:
+        post_risk_score = moderate_content(post['content'])[1]
+        content_score += post_risk_score
+            
+    user_comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
+    for comment in user_comments:
+        comment_risk_score = moderate_content(comment['content'])[1]
+        content_score += comment_risk_score
+
+    date = query_db('SELECT created_at FROM users WHERE id = ?', (user_id))
+    
+    if date:
+        account_age = datetime.today().strftime('%Y-%m-%d') - datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
+    else:
+        account_age = 0
+
+    if  account_age < 7:
+        content_score *= 1.5
+
+    profile = query_db('SELECT profile FROM users WHERE id = ?', (user_id,))[0]['profile']
+    
+
+    if profile:
+        profile_score = moderate_content(profile)[1]
+    
+    if post_risk_score == 0:
+        average_post_score = 0
+    else:
+        posts = query_db('SELECT count(*) FROM posts WHERE user_id = ?', (user_id,))[0]
+        post_count = posts[0]
+        average_post_score = post_risk_score / post_count
+
+    if comment_risk_score == 0:
+        average_comment_score = 0
+    else:
+        comments = query_db('SELECT count(*) FROM comments WHERE user_id = ?', (user_id,))[0]
+        comment_count = comments[0]
+        average_post_score = post_risk_score / comment_count
+
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+    
+    if account_age < 7:
+         user_risk_score = content_risk_score * 1.5
+    elif account_age < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+    
+    if user_risk_score > 5:
+        user_risk_score == 5
+    else: 
+        None
+
+    score = user_risk_score
+
+    return score
 
     
 # Task 3.3
@@ -931,9 +993,39 @@ def moderate_content(content):
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
+    score = 0
+    # 1.1.1
+    TIER1_PATTERN = r'\b(' + '|'.join(TIER1_WORDS) + r')\b'
+    if re.search(TIER1_PATTERN, content, flags=re.IGNORECASE):
+        return "[content removed due to severe violation]", 5.0
+    
+    # 1.1.2
+    TIER2_PATTERN = r'\b(' + '|'.join(TIER2_PHRASES) + r')\b'
+    if re.search(TIER2_PATTERN, content, flags=re.IGNORECASE):
+        return "[content removed due to severe violation]", 5.0
+
+    # 1.2.1
+    TIER3_PATTERN = r'\b(' + '|'.join(TIER3_WORDS) + r')\b'
+    matches = re.findall(TIER3_PATTERN, content, flags=re.IGNORECASE)
+    score += len(matches) * 2
+    content = re.sub(TIER3_PATTERN, lambda m: '*' * len(m.group(0)), content, flags=re.IGNORECASE)
+            
+    # 1.2.2
+    URL_PATTERN = r'https?://\S+|www\.\S+'
+    matches = re.findall(URL_PATTERN, content, flags=re.IGNORECASE)
+    score += len(matches) * 2
+    content = re.sub(URL_PATTERN, "[link removed]", content, flags=re.IGNORECASE)
+
+    # 1.2.3
+    if len(re.findall(r'[A-Z]', content))/len(content) > 0.7:
+        score += 0.5
+
+    # My own filter:
+    matches = re.findall("password", content, flags=re.IGNORECASE)
+    content = re.sub("password", "********", content, flags=re.IGNORECASE)
 
     moderated_content = content
-    score = 0
+    
     
     return moderated_content, score
 
