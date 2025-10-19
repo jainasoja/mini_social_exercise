@@ -889,8 +889,55 @@ def recommend(user_id, filter_following):
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
     """
+    liked_posts_content = query_db('''
+        SELECT p.content FROM posts p
+        JOIN reactions r ON p.id = r.post_id
+        WHERE r.user_id = ?
+    ''', (user_id,))
 
-    recommended_posts = {} 
+    print(liked_posts_content)
+    # If the user hasn't liked any posts return the 5 newest posts
+    if not liked_posts_content:
+        return print("note recommendations yet")
+
+    # 2. Find the most common words from the posts they liked
+    word_counts = collections.Counter()
+    # A simple list of common words to ignore
+    stop_words = {'a', 'an', 'the', 'in', 'on', 'is', 'it', 'to', 'for', 'of', 'and', 'with', 'just', 'than', 'some', 'new', 'out'}
+    
+    for post in liked_posts_content:
+        print(post)
+        # Use regex to find all words in the post content
+        words = re.findall(r'\b\w+\b', post['content'].lower())
+        print(words)
+        for word in words:
+            if word not in stop_words and len(word) > 2:
+                word_counts[word] += 1
+    
+    top_keywords = [word for word, _ in word_counts.most_common(3)]
+    print(top_keywords)
+
+    query = "SELECT p.id, p.content, p.created_at, u.username, u.id as user_id FROM posts p JOIN users u ON p.user_id = u.id"
+    params = []
+    
+    # If filtering by following, add a WHERE clause to only include followed users.
+    if filter_following:
+        query += " WHERE user_id IN (SELECT followed_id FROM follows WHERE follower_id = ?)"
+        params.append(user_id)
+        
+    all_other_posts = query_db(query, tuple(params))
+    
+    liked_post_ids = []
+    recommended_posts = []
+    for post in query_db('SELECT post_id as id FROM reactions WHERE user_id = ?', (user_id,)):
+        liked_post_ids.append(post['id'])
+
+    for post in all_other_posts:
+        if post['id'] not in liked_post_ids and post['user_id'] != user_id:
+            if any(keyword in post['content'].lower() for keyword in top_keywords) and post['user_id'] != 533:
+                recommended_posts.append(post)  
+
+    recommended_posts.sort(key=lambda p: p['created_at'], reverse=True)
 
     return recommended_posts;
 
@@ -909,7 +956,6 @@ def user_risk_analysis(user_id):
         Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     # 2.1
-    content_score = 0
     profile_score = 0
     post_risk_score = 0
     comment_risk_score = 0
@@ -917,28 +963,23 @@ def user_risk_analysis(user_id):
     average_comment_score = 0
     
     user_posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,))
-
     for post in user_posts:
-        post_risk_score = moderate_content(post['content'])[1]
-        content_score += post_risk_score
+        post_risk = moderate_content(post['content'])[1]
+        post_risk_score += post_risk
             
     user_comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,))
     for comment in user_comments:
-        comment_risk_score = moderate_content(comment['content'])[1]
-        content_score += comment_risk_score
+        comment_risk = moderate_content(comment['content'])[1]
+        comment_risk_score += comment_risk
 
-    date = query_db('SELECT created_at FROM users WHERE id = ?', (user_id))
-    
-    if date:
-        account_age = datetime.today().strftime('%Y-%m-%d') - datetime.strptime(date, '%Y-%m-%d %H:%M:%S')
-    else:
-        account_age = 0
+    age = query_db("SELECT CAST((julianday('now') - julianday(created_at)) AS INTEGER) FROM users WHERE id = ?", (user_id,))[0]
+    age = age[0]
 
-    if  account_age < 7:
-        content_score *= 1.5
-
+    if age < 7:
+        post_risk_score *= 1.5
+        comment_risk_score *= 1.5
+        
     profile = query_db('SELECT profile FROM users WHERE id = ?', (user_id,))[0]['profile']
-    
 
     if profile:
         profile_score = moderate_content(profile)[1]
@@ -955,19 +996,19 @@ def user_risk_analysis(user_id):
     else:
         comments = query_db('SELECT count(*) FROM comments WHERE user_id = ?', (user_id,))[0]
         comment_count = comments[0]
-        average_post_score = post_risk_score / comment_count
+        average_comment_score = comment_risk_score / comment_count
 
     content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
-    
-    if account_age < 7:
-         user_risk_score = content_risk_score * 1.5
-    elif account_age < 30:
+
+    if age < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif age < 30:
         user_risk_score = content_risk_score * 1.2
     else:
         user_risk_score = content_risk_score
-    
+
     if user_risk_score > 5:
-        user_risk_score == 5
+        user_risk_score = 5
     else: 
         None
 
@@ -994,6 +1035,15 @@ def moderate_content(content):
     Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
     """
     score = 0
+
+    # 1.2.3
+    if content == None:
+        return None, 0
+
+    alphas = len(re.findall(r'[A-Z]', content))
+    if alphas > 15 and alphas/len(content) > 0.7:
+        score += 0.5
+    
     # 1.1.1
     TIER1_PATTERN = r'\b(' + '|'.join(TIER1_WORDS) + r')\b'
     if re.search(TIER1_PATTERN, content, flags=re.IGNORECASE):
@@ -1010,15 +1060,11 @@ def moderate_content(content):
     score += len(matches) * 2
     content = re.sub(TIER3_PATTERN, lambda m: '*' * len(m.group(0)), content, flags=re.IGNORECASE)
             
-    # 1.2.2
-    URL_PATTERN = r'https?://\S+|www\.\S+'
+    # 1.2.2 URL regex from here: https://www.freecodecamp.org/news/how-to-write-a-regular-expression-for-a-url/
+    URL_PATTERN = r'\b(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?\/[a-zA-Z0-9]{2,}|((https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z]{2,}(\.[a-zA-Z]{2,})(\.[a-zA-Z]{2,})?)|(https:\/\/www\.|http:\/\/www\.|https:\/\/|http:\/\/)?[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}\.[a-zA-Z0-9]{2,}(\.[a-zA-Z0-9]{2,})?\b'
     matches = re.findall(URL_PATTERN, content, flags=re.IGNORECASE)
     score += len(matches) * 2
     content = re.sub(URL_PATTERN, "[link removed]", content, flags=re.IGNORECASE)
-
-    # 1.2.3
-    if len(re.findall(r'[A-Z]', content))/len(content) > 0.7:
-        score += 0.5
 
     # My own filter:
     matches = re.findall("password", content, flags=re.IGNORECASE)
