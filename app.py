@@ -939,7 +939,7 @@ def recommend(user_id, filter_following):
 
     recommended_posts.sort(key=lambda p: p['created_at'], reverse=True)
 
-    return recommended_posts;
+    return recommended_posts[:5];
 
 # Task 3.2
 def user_risk_analysis(user_id):
